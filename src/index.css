@@ -1,0 +1,766 @@
+/* ============================================================
+   WA REACTOR — Nudge / Framer-canvas Aesthetic
+   Clean white • Pixel-art heading • Soft shadows • Playful
+   ============================================================ */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  /* ── Palette ── */
+  --bg:          #FAFAF8;
+  --canvas:      #F3F2EF;
+  --white:       #FFFFFF;
+  --black:       #1A1A1A;
+  --text:        #1A1A1A;
+  --text-muted:  #777777;
+  --text-light:  #AAAAAA;
+
+  --yellow:      #FFE500;
+  --yellow-note: #FFF9C4;
+  --yellow-border: #F0DB00;
+  --cyan:        #00D9C7;
+  --cyan-pale:   #E0FAF8;
+  --pink:        #FF4D8D;
+  --pink-pale:   #FFEEF5;
+  --green:       #4ADE80;
+  --green-pale:  #ECFDF5;
+  --wa-green:    #25D366;
+  --blue:        #0099FF;   /* Framer handle blue */
+
+  /* ── Borders — very light, not heavy ── */
+  --border-light: 1px solid #E8E8E8;
+  --border-mid:   1px solid #D0D0D0;
+  --border-dark:  1.5px solid var(--black);
+
+  /* ── Shadows — natural, not offset ── */
+  --sh-card:  0 2px 12px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.04);
+  --sh-hover: 0 8px 32px rgba(0,0,0,0.10), 0 2px 8px rgba(0,0,0,0.06);
+  --sh-input: 0 1px 4px rgba(0,0,0,0.06);
+  --sh-note:  2px 4px 12px rgba(0,0,0,0.10);
+  --sh-btn:   0 2px 8px rgba(255,229,0,0.35), 0 1px 3px rgba(0,0,0,0.10);
+  --sh-float: 0 12px 40px rgba(0,0,0,0.08);
+
+  /* ── Typography ── */
+  --font-pixel: 'Pixelify Sans', system-ui, sans-serif;
+  --font-body:  'DM Sans', system-ui, sans-serif;
+  --font-mono:  'DM Mono', 'Courier New', monospace;
+
+  /* ── Misc ── */
+  --radius-sm:   4px;
+  --radius:      10px;
+  --radius-lg:   16px;
+  --radius-pill: 999px;
+  --transition:  0.15s ease;
+}
+
+html, body, #root { height: 100%; }
+
+body {
+  font-family: var(--font-body);
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Subtle dot grid on bg ── */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: radial-gradient(circle, rgba(0,0,0,0.07) 1px, transparent 1px);
+  background-size: 24px 24px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ============================================================
+   FLOATING EMOJI STICKERS
+   ============================================================ */
+
+.app-stickers {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.sticker {
+  position: absolute;
+  user-select: none;
+  animation: stickerFloat 7s ease-in-out infinite;
+  /* paper-sticker look: soft drop shadow */
+  filter: drop-shadow(1px 3px 5px rgba(0,0,0,0.13));
+}
+
+/* Sizes + positions + rotations */
+.sticker.s1 { top: 9%;  left: 5%;   font-size: 2.4rem; transform: rotate(-13deg); animation-delay: 0s;   }
+.sticker.s2 { top: 16%; right: 6%;  font-size: 2rem;   transform: rotate(10deg);  animation-delay: 1.3s; }
+.sticker.s3 { top: 50%; left: 3.5%; font-size: 1.9rem; transform: rotate(-7deg);  animation-delay: 0.7s; }
+.sticker.s4 { top: 66%; right: 4%;  font-size: 2.3rem; transform: rotate(17deg);  animation-delay: 2.1s; }
+.sticker.s5 { top: 35%; right: 7%;  font-size: 1.7rem; transform: rotate(-5deg);  animation-delay: 3.2s; }
+.sticker.s6 { top: 80%; left: 6%;   font-size: 2rem;   transform: rotate(9deg);   animation-delay: 1.6s; }
+
+@keyframes stickerFloat {
+  0%, 100% { translate: 0 0px;  }
+  50%       { translate: 0 -9px; }
+}
+
+/* ============================================================
+   LAYOUT
+   ============================================================ */
+
+.app-wrapper {
+  position: relative;
+  z-index: 1;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 28px 20px 80px;
+}
+
+/* ============================================================
+   HEADER
+   ============================================================ */
+
+.header {
+  text-align: center;
+  margin-bottom: 32px;
+  margin-top: 36px;
+}
+
+/* Small "WA REACTOR" badge — colorful tag, not heavy */
+.eyebrow-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--yellow);
+  border: 1px solid var(--yellow-border);
+  border-radius: var(--radius-pill);
+  padding: 6px 16px;
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  font-weight: 500;
+  color: var(--black);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 24px;
+  box-shadow: var(--sh-note);
+  transition: transform var(--transition), box-shadow var(--transition);
+}
+
+.eyebrow-badge:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(255,229,0,0.4);
+}
+
+.pulse-dot {
+  width: 6px;
+  height: 6px;
+  background: var(--black);
+  border-radius: 50%;
+  flex-shrink: 0;
+  animation: pulseDot 2s ease-in-out infinite;
+}
+
+@keyframes pulseDot {
+  0%, 100% { opacity: 1;   transform: scale(1);    }
+  50%       { opacity: 0.3; transform: scale(0.5);  }
+}
+
+/* BIG pixel-art display heading */
+.header-title {
+  font-family: var(--font-pixel);
+  font-size: clamp(2.8rem, 9vw, 5.6rem);
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: 0.01em;
+  color: var(--black);
+  margin-bottom: 18px;
+}
+
+/* "REACTION" word — highlighted like sticky note */
+.title-accent {
+  display: inline-block;
+  background: var(--yellow);
+  border-radius: 4px;
+  padding: 0 10px 2px;
+  transform: rotate(-1deg);
+}
+
+.header-sub {
+  font-size: 1rem;
+  color: var(--text-muted);
+  font-weight: 400;
+  max-width: 360px;
+  margin: 0 auto;
+  line-height: 1.65;
+}
+
+/* ============================================================
+   RULER BAR — light Framer-style ruler above card
+   ============================================================ */
+
+.ruler-bar {
+  width: 100%;
+  max-width: 600px;
+  height: 24px;
+  background: var(--white);
+  border: var(--border-light);
+  border-bottom: none;
+  display: flex;
+  align-items: flex-end;
+  padding: 0 4px;
+  overflow: hidden;
+  position: relative;
+  z-index: 1;
+  border-radius: var(--radius) var(--radius) 0 0;
+}
+
+.ruler-mark {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.ruler-mark::after {
+  content: '';
+  width: 1px;
+  background: #DEDEDE;
+  height: 5px;
+}
+
+.ruler-mark.major::after {
+  height: 11px;
+  background: #BDBDBD;
+}
+
+.ruler-num {
+  font-family: var(--font-mono);
+  font-size: 0.44rem;
+  color: var(--text-light);
+  margin-bottom: 2px;
+  position: absolute;
+  bottom: 0;
+}
+
+/* ============================================================
+   MAIN CARD — Framer canvas selection look
+   ============================================================ */
+
+.main-card {
+  width: 100%;
+  max-width: 560px;
+  background: var(--white);
+  border: var(--border-light);
+  /* Framer-style selection: thin dashed blue outline */
+  outline: 2px dashed rgba(0, 153, 255, 0.45);
+  outline-offset: 3px;
+  box-shadow: var(--sh-float);
+  border-radius: 0 0 var(--radius) var(--radius);
+  padding: 30px 26px;
+  position: relative;
+  z-index: 1;
+  transition: box-shadow var(--transition);
+}
+
+.main-card:hover {
+  box-shadow: 0 20px 60px rgba(0,0,0,0.10);
+}
+
+/* ── Framer handle — thin blue squares ── */
+.handle {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  background: var(--white);
+  border: 1.5px solid var(--blue);
+  border-radius: 1px;
+  z-index: 10;
+  transition: background var(--transition);
+}
+
+.handle:hover { background: var(--blue); }
+
+.handle.tl { top: -4px;    left: -4px; }
+.handle.tr { top: -4px;    right: -4px; }
+.handle.bl { bottom: -4px; left: -4px; }
+.handle.br { bottom: -4px; right: -4px; }
+.handle.mt { top: -4px;    left: 50%; transform: translateX(-50%); }
+.handle.mb { bottom: -4px; left: 50%; transform: translateX(-50%); }
+.handle.ml { top: 50%;     left: -4px; transform: translateY(-50%); }
+.handle.mr { top: 50%;     right: -4px; transform: translateY(-50%); }
+
+/* ============================================================
+   FIELD GROUPS
+   ============================================================ */
+
+.field-group {
+  margin-bottom: 0;
+}
+
+/* Clean monospace label, light color */
+.field-label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+
+/* Very subtle dashed divider */
+.field-divider {
+  border: none;
+  border-top: 1px dashed #E8E8E8;
+  margin: 22px 0;
+}
+
+/* ============================================================
+   URL INPUT
+   ============================================================ */
+
+.url-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.url-icon {
+  position: absolute;
+  left: 12px;
+  font-size: 0.9rem;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.url-input {
+  width: 100%;
+  background: var(--bg);
+  border: var(--border-light);
+  border-radius: var(--radius);
+  padding: 11px 14px 11px 38px;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text);
+  outline: none;
+  box-shadow: var(--sh-input);
+  transition: border-color var(--transition), box-shadow var(--transition), background var(--transition);
+}
+
+.url-input::placeholder {
+  color: var(--text-light);
+  font-family: var(--font-body);
+  font-size: 0.84rem;
+}
+
+.url-input:focus {
+  border-color: var(--black);
+  background: var(--white);
+  box-shadow: 0 0 0 3px rgba(0,0,0,0.06), var(--sh-input);
+}
+
+/* ── Parsed chips — colorful sticky-tag style ── */
+.parsed-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.parsed-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--yellow);
+  border: 1px solid var(--yellow-border);
+  border-radius: var(--radius-pill);
+  padding: 4px 12px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 500;
+  box-shadow: var(--sh-note);
+  animation: tagPop 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.parsed-chip.accent {
+  background: var(--cyan-pale);
+  border-color: var(--cyan);
+}
+
+@keyframes tagPop {
+  from { opacity: 0; transform: scale(0.82) translateY(4px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.chip-label {
+  font-size: 0.54rem;
+  letter-spacing: 0.06em;
+  opacity: 0.55;
+}
+
+.chip-value {
+  font-size: 0.72rem;
+  font-weight: 500;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ============================================================
+   EMOJI TEXTAREA — sticky-note style
+   ============================================================ */
+
+.emoji-textarea {
+  width: 100%;
+  /* Sticky note: light yellow, slight rotation */
+  background: var(--yellow-note);
+  border: 1px solid #EDE380;
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  font-family: var(--font-body);
+  font-size: 1.05rem;
+  color: var(--text);
+  outline: none;
+  resize: vertical;
+  min-height: 78px;
+  box-shadow: var(--sh-note);
+  transform: rotate(-0.3deg);
+  transition: border-color var(--transition), box-shadow var(--transition), transform var(--transition);
+  line-height: 1.7;
+}
+
+.emoji-textarea::placeholder {
+  color: #BBB380;
+  font-size: 0.88rem;
+}
+
+.emoji-textarea:focus {
+  border-color: #C8BC00;
+  box-shadow: 0 4px 20px rgba(255,229,0,0.25);
+  transform: rotate(0deg);
+}
+
+/* Count tag — small pill */
+.count-tag {
+  margin-left: auto;
+  background: var(--yellow);
+  border: 1px solid var(--yellow-border);
+  border-radius: var(--radius-pill);
+  padding: 2px 10px;
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  font-weight: 500;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+}
+
+/* ============================================================
+   FIELD ERROR
+   ============================================================ */
+
+.field-error {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  font-weight: 500;
+  color: var(--pink);
+  margin-top: 6px;
+}
+
+.field-error::before { content: '⚠'; }
+
+/* ============================================================
+   COOLDOWN STATUS — card-like, no heavy border
+   ============================================================ */
+
+.cooldown-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+  background: var(--bg);
+  border: var(--border-light);
+  border-radius: var(--radius);
+  margin-bottom: 12px;
+  box-shadow: var(--sh-input);
+}
+
+.cd-dots {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.cd-dot {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #E8E8E8;
+  border: 1px solid #D0D0D0;
+  flex-shrink: 0;
+  transition: all 0.2s ease;
+}
+
+.cd-dot.used {
+  background: var(--wa-green);
+  border-color: #1fae53;
+  box-shadow: 0 1px 4px rgba(37,211,102,0.35);
+}
+
+.cd-dot.used-cd {
+  background: var(--pink);
+  border-color: #e0336b;
+  box-shadow: 0 1px 4px rgba(255,77,141,0.35);
+}
+
+.cd-label {
+  flex: 1;
+  font-size: 0.83rem;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.cd-badge {
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  background: var(--yellow);
+  border: 1px solid var(--yellow-border);
+  border-radius: var(--radius-pill);
+  padding: 3px 10px;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+  transition: all var(--transition);
+}
+
+.cd-badge.on-cd {
+  background: var(--pink-pale);
+  border-color: var(--pink);
+  color: var(--pink);
+}
+
+/* ── Cooldown progress bar ── */
+.cd-bar-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.cd-bar-track {
+  flex: 1;
+  height: 6px;
+  background: #F0F0F0;
+  border: var(--border-light);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
+
+.cd-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--pink), #ff85b3);
+  border-radius: var(--radius-pill);
+  transition: width 1s linear;
+}
+
+.cd-bar-label {
+  font-family: var(--font-mono);
+  font-size: 0.67rem;
+  font-weight: 500;
+  color: var(--pink);
+  white-space: nowrap;
+  min-width: 90px;
+  text-align: right;
+}
+
+/* ============================================================
+   SUBMIT BUTTON — bright yellow, clean
+   ============================================================ */
+
+.submit-btn {
+  width: 100%;
+  padding: 15px 24px;
+  background: var(--yellow);
+  border: 1px solid var(--yellow-border);
+  border-radius: var(--radius);
+  font-family: var(--font-pixel);
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--black);
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  outline: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 20px;
+  box-shadow: var(--sh-btn);
+  transition: transform var(--transition), box-shadow var(--transition), background var(--transition);
+}
+
+.submit-btn:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 24px rgba(255,229,0,0.5), 0 2px 8px rgba(0,0,0,0.10);
+  background: #FFE800;
+}
+
+.submit-btn:active:not(:disabled) {
+  transform: translateY(0px);
+  box-shadow: var(--sh-btn);
+}
+
+.submit-btn:disabled {
+  background: #F0F0F0;
+  border-color: #E0E0E0;
+  color: #AAAAAA;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.submit-btn.loading {
+  background: #FFF9C4;
+}
+
+/* ============================================================
+   SPINNER
+   ============================================================ */
+
+.spinner {
+  width: 15px;
+  height: 15px;
+  border: 2px solid rgba(0,0,0,0.12);
+  border-top-color: var(--black);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ============================================================
+   LOG BOX
+   ============================================================ */
+
+.log-section { margin-top: 22px; }
+
+.log-box {
+  background: var(--bg);
+  border: var(--border-light);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  max-height: 200px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  box-shadow: var(--sh-input);
+}
+
+.log-box::-webkit-scrollbar { width: 3px; }
+.log-box::-webkit-scrollbar-track { background: transparent; }
+.log-box::-webkit-scrollbar-thumb { background: #D0D0D0; border-radius: 4px; }
+
+.log-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  line-height: 1.5;
+  animation: fadeUp 0.18s ease;
+}
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.log-icon {
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.58rem;
+  font-weight: 600;
+  margin-top: 1px;
+  border: 1px solid currentColor;
+}
+
+.log-icon.info    { background: #EFF6FF; color: #3B82F6; }
+.log-icon.success { background: var(--green-pale); color: #16A34A; }
+.log-icon.error   { background: var(--pink-pale); color: var(--pink); }
+.log-icon.warn    { background: var(--yellow-note); color: #A16207; }
+
+.log-text  { color: var(--text-muted); }
+.log-time  { color: var(--text-light); font-size: 0.6rem; margin-left: 4px; }
+
+/* ============================================================
+   RESULT CARD
+   ============================================================ */
+
+.result-card {
+  display: flex;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--green-pale);
+  border: 1px solid #A7F3D0;
+  border-radius: var(--radius);
+  margin-top: 14px;
+  align-items: flex-start;
+  animation: tagPop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  box-shadow: 0 2px 8px rgba(74,222,128,0.15);
+}
+
+.result-card.error {
+  background: var(--pink-pale);
+  border-color: #FBCFE8;
+  box-shadow: 0 2px 8px rgba(255,77,141,0.10);
+}
+
+.result-icon { font-size: 1.3rem; flex-shrink: 0; }
+
+.result-card strong {
+  font-family: var(--font-pixel);
+  font-size: 0.78rem;
+  font-weight: 700;
+  display: block;
+  margin-bottom: 4px;
+}
+
+.result-card p {
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+/* ============================================================
+   RESPONSIVE
+   ============================================================ */
+
+@media (max-width: 600px) {
+  .sticker.s2, .sticker.s4, .sticker.s5 { display: none; }
+  .header-title { font-size: 2.4rem; }
+  .main-card { padding: 20px 14px; }
+  .ruler-bar { display: none; }
+}
