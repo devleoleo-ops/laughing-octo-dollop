@@ -159,7 +159,8 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [logs,    setLogs]    = useState([]);
   const [result,  setResult]  = useState(null);
-  const logBoxRef = useRef(null);
+  const logBoxRef    = useRef(null);
+  const submittingRef = useRef(false); // synchronous double-submit guard
   const fp = getFingerprint();
 
   /* ── Load cooldown from Firebase ── */
@@ -251,7 +252,7 @@ export default function App() {
 
   /* ── Submit ── */
   const handleSubmit = useCallback(async () => {
-    if (loading) return;
+    if (submittingRef.current) return; // blok double-fire sebelum state update
     if (!channelLink.trim()) { setUrlError('Masukkan link channel terlebih dahulu.'); return; }
     if (!parsedChannel)      { setUrlError('URL tidak valid.'); return; }
     if (parsedEmojis.length === 0) { setEmojiError('Masukkan emoji terlebih dahulu.'); return; }
@@ -260,6 +261,7 @@ export default function App() {
       return;
     }
 
+    submittingRef.current = true; // kunci segera (synchronous)
     setLoading(true);
     setResult(null);
     addLog('info', `Target: ${channelLink.trim()}`);
@@ -326,9 +328,10 @@ export default function App() {
       addLog('error', msg);
       setResult({ ok: false, data: {} });
     } finally {
+      submittingRef.current = false; // buka kunci
       setLoading(false);
     }
-  }, [loading, channelLink, parsedChannel, parsedChatId, parsedEmojis, useCount, cooldownEnd, addLog, fp]);
+  }, [channelLink, parsedChannel, parsedChatId, parsedEmojis, useCount, cooldownEnd, addLog, fp]);
 
   /* ── Derived ── */
   const isOnCooldown = useCount >= FREE_LIMIT && !!cooldownEnd && cooldownEnd > Date.now();
