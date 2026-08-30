@@ -270,9 +270,8 @@ export default function App() {
     try {
       /* ── Step 1: Handshake token ── */
       const hsRes = await fetch(`${API_BASE}/handshake`, {
-        method     : 'POST',
-        credentials: 'include',
-        headers    : { 'X-API-Key': API_KEY },
+        method : 'POST',
+        headers: { 'X-API-Key': API_KEY },
       });
 
       if (!hsRes.ok) {
@@ -286,8 +285,7 @@ export default function App() {
       /* ── Step 2: Kirim reaction ── */
       const t0  = Date.now();
       const res = await fetch(`${API_BASE}/react`, {
-        method     : 'POST',
-        credentials: 'include',
+        method : 'POST',
         headers: {
           'Content-Type'      : 'application/json',
           'X-API-Key'         : API_KEY,
@@ -298,6 +296,7 @@ export default function App() {
           reactions: parsedEmojis,
         }),
       });
+
 
 
       const data    = await res.json();
