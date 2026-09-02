@@ -306,23 +306,29 @@ export default function App() {
       if (res.ok && data?.ok !== false) {
         addLog('success', `Berhasil dikirim! (${latency}ms)`);
         setResult({ ok: true, data });
+
+        /* ── Update daily cooldown HANYA jika sukses ── */
+        const newCount   = useCount + 1;
+        const todayMs    = todayMidnightMs();
+        const dayStartTs = Timestamp.fromMillis(todayMs);
+        setUseCount(newCount);
+
+        if (newCount >= FREE_LIMIT) {
+          setCooldownEnd(todayMs + DAY_MS);
+          addLog('warn', `Batas ${FREE_LIMIT}x/hari tercapai. Reset besok tengah malam.`);
+        }
+        await writeCooldownDoc(fp, newCount, dayStartTs);
       } else {
-        const msg = res.status === 429 ? 'Server sedang overload, coba lagi sebentar.' : 'Pengiriman gagal, coba lagi.';
+        const errCode = data?.error ?? '';
+        const msg = errCode === 'handshake_token_used'
+          ? 'Token expired/reused — coba kirim lagi.'
+          : res.status === 429
+            ? 'Server sedang overload, coba lagi sebentar.'
+            : 'Pengiriman gagal, coba lagi.';
         addLog('error', msg);
         setResult({ ok: false, data });
+        /* ── Jangan nambah counter kalau gagal ── */
       }
-
-      /* ── Update daily cooldown ── */
-      const newCount   = useCount + 1;
-      const todayMs    = todayMidnightMs();
-      const dayStartTs = Timestamp.fromMillis(todayMs);
-      setUseCount(newCount);
-
-      if (newCount >= FREE_LIMIT) {
-        setCooldownEnd(todayMs + DAY_MS);
-        addLog('warn', `Batas ${FREE_LIMIT}x/hari tercapai. Reset besok tengah malam.`);
-      }
-      await writeCooldownDoc(fp, newCount, dayStartTs);
 
     } catch (err) {
       const msg = /429|rate|overload/i.test(err.message)
