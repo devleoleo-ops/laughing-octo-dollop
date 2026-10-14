@@ -3,49 +3,54 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // ─── cooldowns collection ──────────────────────────────────────────────────
-    // Menyimpan jumlah penggunaan harian per fingerprint anonim.
-    // Key     = fingerprint (UUID dari localStorage).
-    // dayStartAt = Timestamp tengah malam (00:00:00) saat hari pertama pakai.
-    // count   = jumlah pemakaian di hari tersebut (max 3).
-    // Reset otomatis sisi klien ketika dayStartAt < midnight hari ini.
+    // ─── cooldowns ────────────────────────────────────────────────────────────
+    // Limit harian per fingerprint (UUID dari localStorage).
+    // WRITE hanya oleh server (Admin SDK bypass rules ini).
+    // READ boleh dari browser — frontend perlu baca sisa limit milik sendiri.
     match /cooldowns/{fp} {
 
-      // Siapa saja boleh baca dokumen miliknya sendiri.
+      // Browser boleh baca doc miliknya sendiri
       allow read: if true;
 
-      // Boleh create/update dengan validasi ketat:
-      allow write: if
-        // 1. Hanya field yang dikenal
-        request.resource.data.keys().hasOnly(['count', 'dayStartAt', 'updatedAt'])
+      // Browser TIDAK boleh tulis langsung —
+      // penulisan dilakukan oleh Vercel (Admin SDK, bypass rules).
+      // Kalau kamu mau tetap allow write dari FE lama, uncomment blok di bawah:
+      //
+      // allow write: if
+      //   request.resource.data.keys().hasOnly(['count', 'dayStartAt', 'updatedAt'])
+      //   && request.resource.data.count is int
+      //   && request.resource.data.count >= 0
+      //   && request.resource.data.count <= 3
+      //   && (
+      //        !resource.data.keys().hasAny(['count'])
+      //        || request.resource.data.count <= resource.data.count + 1
+      //        || request.resource.data.count == 0
+      //      )
+      //   && (
+      //        request.resource.data.dayStartAt == null
+      //        || request.resource.data.dayStartAt is timestamp
+      //      )
+      //   && request.resource.data.updatedAt == request.time;
 
-        // 2. count harus integer ≥ 0 dan ≤ 3 (FREE_LIMIT)
-        && request.resource.data.count is int
-        && request.resource.data.count >= 0
-        && request.resource.data.count <= 3
-
-        // 3. count tidak boleh naik lebih dari 1 per request
-        //    (mencegah klien langsung set count besar)
-        && (
-             !resource.data.keys().hasAny(['count'])        // dokumen baru
-             || request.resource.data.count <= resource.data.count + 1
-             || request.resource.data.count == 0            // reset hari baru
-           )
-
-        // 4. dayStartAt harus berupa Timestamp (bukan null, kecuali reset)
-        && (
-             request.resource.data.dayStartAt == null
-             || request.resource.data.dayStartAt is timestamp
-           )
-
-        // 5. updatedAt harus selalu pakai server timestamp
-        && request.resource.data.updatedAt == request.time;
-
-      // Tidak boleh dihapus dari klien
+      allow write:  if false; // hanya Admin SDK (server)
       allow delete: if false;
     }
 
-    // Semua koleksi lain ditolak
+    // ─── react_queue ─────────────────────────────────────────────────────────
+    // Antrian reaction. Hanya ditulis oleh Vercel & dibaca/diupdate oleh VPS.
+    // Browser TIDAK boleh baca atau tulis sama sekali.
+    match /react_queue/{docId} {
+      allow read, write: if false; // 100% server-only (Admin SDK)
+    }
+
+    // ─── ip_limits ────────────────────────────────────────────────────────────
+    // Rate limit per IP hash. Hanya ditulis & dibaca oleh Vercel.
+    // Browser tidak boleh akses.
+    match /ip_limits/{ipHash} {
+      allow read, write: if false; // server-only
+    }
+
+    // ─── Semua koleksi lain: DITOLAK ─────────────────────────────────────────
     match /{document=**} {
       allow read, write: if false;
     }

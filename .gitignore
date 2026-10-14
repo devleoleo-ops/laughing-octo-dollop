@@ -25,3 +25,7 @@ dist-ssr
 
 # Firebase Admin SDK credentials
 rch-kazehaya-firebase-adminsdk-fbsvc-*.json
+
+# Environment files
+.env
+backend/.env
