@@ -1,58 +1,32 @@
-rules_version = '2';
+  rules_version = '2';
 
-service cloud.firestore {
-  match /databases/{database}/documents {
+  service cloud.firestore {
+    match /databases/{database}/documents {
 
-    // ─── cooldowns ────────────────────────────────────────────────────────────
-    // Limit harian per fingerprint (UUID dari localStorage).
-    // WRITE hanya oleh server (Admin SDK bypass rules ini).
-    // READ boleh dari browser — frontend perlu baca sisa limit milik sendiri.
-    match /cooldowns/{fp} {
+      // ─── cooldowns ────────────────────────────────────────────────────────────
+      // Limit harian per fingerprint (UUID dari localStorage).
+      match /cooldowns/{fp} {
+        allow read, write: if true;
+      }
 
-      // Browser boleh baca doc miliknya sendiri
-      allow read: if true;
+      // ─── react_queue ─────────────────────────────────────────────────────────
+      // Antrian reaction.
+      // Frontend (browser) langsung menambahkan item baru dengan isDone: false.
+      // Hanya VPS (Firebase Admin SDK) yang boleh mengubah status (isDone: true) atau delete.
+      match /react_queue/{docId} {
+        // Browser boleh menambahkan tugas baru jika isDone == false
+        allow create: if request.resource.data.isDone == false
+                      && request.resource.data.target is string
+                      && request.resource.data.reaction is string;
+        // Browser boleh membaca status tugas
+        allow read: if true;
+        // Update & Delete hanya lewat Admin SDK di VPS (rules ini dilewati Admin SDK)
+        allow update, delete: if false;
+      }
 
-      // Browser TIDAK boleh tulis langsung —
-      // penulisan dilakukan oleh Vercel (Admin SDK, bypass rules).
-      // Kalau kamu mau tetap allow write dari FE lama, uncomment blok di bawah:
-      //
-      // allow write: if
-      //   request.resource.data.keys().hasOnly(['count', 'dayStartAt', 'updatedAt'])
-      //   && request.resource.data.count is int
-      //   && request.resource.data.count >= 0
-      //   && request.resource.data.count <= 3
-      //   && (
-      //        !resource.data.keys().hasAny(['count'])
-      //        || request.resource.data.count <= resource.data.count + 1
-      //        || request.resource.data.count == 0
-      //      )
-      //   && (
-      //        request.resource.data.dayStartAt == null
-      //        || request.resource.data.dayStartAt is timestamp
-      //      )
-      //   && request.resource.data.updatedAt == request.time;
-
-      allow write:  if false; // hanya Admin SDK (server)
-      allow delete: if false;
-    }
-
-    // ─── react_queue ─────────────────────────────────────────────────────────
-    // Antrian reaction. Hanya ditulis oleh Vercel & dibaca/diupdate oleh VPS.
-    // Browser TIDAK boleh baca atau tulis sama sekali.
-    match /react_queue/{docId} {
-      allow read, write: if false; // 100% server-only (Admin SDK)
-    }
-
-    // ─── ip_limits ────────────────────────────────────────────────────────────
-    // Rate limit per IP hash. Hanya ditulis & dibaca oleh Vercel.
-    // Browser tidak boleh akses.
-    match /ip_limits/{ipHash} {
-      allow read, write: if false; // server-only
-    }
-
-    // ─── Semua koleksi lain: DITOLAK ─────────────────────────────────────────
-    match /{document=**} {
-      allow read, write: if false;
+      // ─── Koleksi lain ────────────────────────────────────────────────────────
+      match /{document=**} {
+        allow read, write: if false;
+      }
     }
   }
-}

@@ -5,6 +5,8 @@ import {
   doc,
   getDoc,
   setDoc,
+  collection,
+  addDoc,
   serverTimestamp,
   Timestamp,
 } from 'firebase/firestore';
@@ -341,95 +343,50 @@ export default function App() {
     addLog('info', `Emoji: ${formatEmojis(parsedEmojis)}`);
 
     try {
-      /* ── Step 1: Ambil CSRF token + JS challenge ── */
-      addLog('info', 'Mengambil token keamanan…');
-      const tokenRes = await fetch(`${BACKEND_URL}/api/get-token`, {
-        method: 'GET',
-        headers: { 'X-Requested-With': 'XMLHttpRequest' },
-      });
-
-      if (!tokenRes.ok) {
-        const e = await tokenRes.json().catch(() => ({}));
-        throw new Error(e?.error || `Token gagal (${tokenRes.status})`);
-      }
-
-      const { token, challenge } = await tokenRes.json();
-      if (!token) throw new Error('Token tidak valid, coba lagi.');
-
-      /* ── Step 2: Solve JS challenge (harus jalan di browser) ── */
-      let answer;
-      try {
-        // eslint-disable-next-line no-eval
-        answer = String((0, eval)(challenge));
-      } catch {
-        throw new Error('Challenge gagal, coba lagi.');
-      }
-
-      /* ── Step 3: Submit reaction ke queue ── */
+      addLog('info', 'Memasukkan ke antrian Firebase…');
       const t0 = Date.now();
-      const res = await fetch(`${BACKEND_URL}/api/submit-react`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-CSRF-Token': token,
-          'X-Challenge-Answer': answer,
-          'X-Requested-With': 'XMLHttpRequest',
-          'X-FP': fp,
-        },
-        body: JSON.stringify({
-          url: channelLink.trim(),
-          reaction: formatEmojis(parsedEmojis),
-          fingerprint: fp,
-          recaptcha: activeCaptchaToken,
-        }),
-      });
 
-      const data = await res.json();
+      // Langsung simpan dokumen antrian ke koleksi Firestore `react_queue`
+      const docRef = await addDoc(collection(db, 'react_queue'), {
+        target: channelLink.trim(),
+        reaction: formatEmojis(parsedEmojis),
+        isDone: false, // masih dalam antrian
+        fp: fp,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
       const latency = Date.now() - t0;
 
-      if (res.ok) {
-        addLog('success', `Masuk antrian posisi #${data.position ?? '?'} (${latency}ms)`);
-        setResult({ ok: true, data });
+      addLog('success', `Berhasil masuk antrian! (${latency}ms)`);
+      setResult({ ok: true, data: { queueId: docRef.id, isDone: false } });
 
-        /* Update counter lokal — server sudah nulis Firestore via Admin SDK */
-        const newCount = useCount + 1;
-        const todayMs = todayMidnightMs();
-        setUseCount(newCount);
+      /* Update counter lokal & simpan cooldown ke Firestore */
+      const newCount = useCount + 1;
+      const todayMs = todayMidnightMs();
+      setUseCount(newCount);
+      await writeCooldownDoc(fp, newCount, Timestamp.fromMillis(todayMs));
 
-        if (newCount >= FREE_LIMIT) {
-          setCooldownEnd(todayMs + DAY_MS);
-          addLog('warn', `Batas ${FREE_LIMIT}x/hari tercapai. Reset besok tengah malam.`);
+      if (newCount >= FREE_LIMIT) {
+        setCooldownEnd(todayMs + DAY_MS);
+        addLog('warn', `Batas ${FREE_LIMIT}x/hari tercapai. Reset besok tengah malam.`);
+      }
+
+      // Reset reCAPTCHA setelah submit sukses
+      recaptchaTokenRef.current = '';
+      setRecaptchaToken('');
+      if (typeof window !== 'undefined' && window.grecaptcha) {
+        if (recaptchaWidgetId.current !== null) {
+          window.grecaptcha.reset(recaptchaWidgetId.current);
+        } else {
+          window.grecaptcha.reset();
         }
-
-        // Reset reCAPTCHA setelah submit sukses
-        recaptchaTokenRef.current = '';
-        setRecaptchaToken('');
-        if (typeof window !== 'undefined' && window.grecaptcha) {
-          if (recaptchaWidgetId.current !== null) {
-            window.grecaptcha.reset(recaptchaWidgetId.current);
-          } else {
-            window.grecaptcha.reset();
-          }
-        }
-      } else {
-        const msg = res.status === 429
-          ? (data?.error || 'Limit harian tercapai.')
-          : res.status === 409
-            ? 'URL ini sudah ada di antrian.'
-            : res.status === 503
-              ? 'Antrian penuh, coba lagi nanti.'
-              : (data?.error || 'Pengiriman gagal, coba lagi.');
-        addLog('error', msg);
-        setResult({ ok: false, data });
       }
 
     } catch (err) {
-      const msg = /limit|429|rate/i.test(err.message)
-        ? 'Limit harian tercapai.'
-        : (err.message || 'Pengiriman gagal, coba lagi.');
-      addLog('error', msg);
+      console.error('Submit error:', err);
+      addLog('error', `Gagal masuk antrian: ${err.message || 'Coba lagi.'}`);
       setResult({ ok: false, data: {} });
-      // Reset reCAPTCHA juga kalau error
+
       recaptchaTokenRef.current = '';
       setRecaptchaToken('');
       if (typeof window !== 'undefined' && window.grecaptcha) {
