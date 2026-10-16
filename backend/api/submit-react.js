@@ -121,12 +121,12 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // ── 8: Global queue size cap ──────────────────────────────
-    const [pendSnap, procSnap] = await Promise.all([
-      db.collection(COLL_QUEUE).where('status', '==', 'pending').count().get(),
-      db.collection(COLL_QUEUE).where('status', '==', 'processing').count().get(),
-    ]);
-    const queueCount = pendSnap.data().count + procSnap.data().count;
+    // ── 8: Global queue size cap (1 query count hemat kuota) ─
+    const queueSnap = await db.collection(COLL_QUEUE)
+      .where('isDone', '==', false)
+      .count()
+      .get();
+    const queueCount = queueSnap.data().count;
 
     if (queueCount >= MAX_QUEUE)
       return res.status(503).json({
@@ -135,10 +135,10 @@ module.exports = async function handler(req, res) {
         queueLen: queueCount,
       });
 
-    // ── 9: Duplicate URL check ────────────────────────────────
+    // ── 9: Duplicate URL check (hanya cek yg belum selesai) ───
     const dupSnap = await db.collection(COLL_QUEUE)
       .where('target', '==', postUrl)
-      .where('status', '==', 'pending')
+      .where('isDone', '==', false)
       .limit(1).get();
 
     if (!dupSnap.empty)
@@ -147,11 +147,11 @@ module.exports = async function handler(req, res) {
         code : 'DUPLICATE_URL',
       });
 
-    // ── 10: Simpan ke Firestore queue ─────────────────────────
+    // ── 10: Simpan ke Firestore queue (isDone: false) ─────────
     const docRef = await db.collection(COLL_QUEUE).add({
       target    : postUrl,
       reaction  : reaction.trim(),
-      status    : 'pending',
+      isDone    : false, // false = antrian, true = sudah dikerjakan
       fp        : fp || null,
       ipHash,
       createdAt : FieldValue.serverTimestamp(),

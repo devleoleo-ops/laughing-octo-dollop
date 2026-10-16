@@ -1,42 +1,53 @@
 /**
- * Backend Proxy Server — WhatsApp Reaction Queue v3
+ * Backend Proxy Server — WhatsApp Reaction Queue v4 (Quota-Optimized)
  *
- * Anti-abuse (server-side, tidak bisa di-bypass dari frontend):
- *   1. Rate limit per fingerprint  — max DAILY_LIMIT request/hari (cek Firestore `cooldowns`)
+ * Perubahan dari v3:
+ *   - Field status antrian menggunakan `isDone: boolean`:
+ *       - isDone: false  → masih dalam antrian
+ *       - isDone: true   → sudah dikerjakan (selesai)
+ *   - Hapus state transient "processing" dari Firestore (disimpan di in-memory VPS)
+ *     → Menghemat 50% Firestore Writes & mencegah cascading snapshot triggers!
+ *   - Batch processing & in-memory sorting:
+ *     → Mencegah query ulang berulang-ulang (O(N^2) reads dihilangkan)
+ *   - In-memory cache untuk queue count (hemat count reads pada polling/health check)
+ *   - Realtime listener hanya memantau `isDone == false`
+ *   - Auto-cleanup dokumen `isDone: true` yang sudah berumur > 24 jam agar koleksi tetap bersih
+ *
+ * Anti-abuse:
+ *   1. Rate limit per fingerprint  — max DAILY_LIMIT request/hari (Firestore `cooldowns`)
  *   2. Rate limit per IP           — max IP_BURST_LIMIT request/menit (in-memory)
- *   3. Max queue size global       — tolak kalau antrian sudah penuh (MAX_QUEUE_SIZE)
- *   4. Duplicate URL check         — URL yang sama sudah ada di queue? tolak
- *   5. X-Proxy-Secret header auth  — wajib ada untuk POST /react
- *
- * Queue disimpan di Firebase Firestore (`react_queue`).
- * Semua config sensitif ada di .env.
+ *   3. Max queue size global       — tolak jika antrian penuh (MAX_QUEUE_SIZE)
+ *   4. Duplicate URL check         — tolak jika URL yang sama masih antre (isDone: false)
+ *   5. X-Proxy-Secret header auth  — proteksi endpoint POST /react
  *
  * @author YogaXD
  */
 
-'use strict';
+const path  = require('path');
+const fs    = require('fs');
 
+// Load .env dari direktori backend atau root
+require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 require('dotenv').config();
 
 const http  = require('http');
 const https = require('https');
-const { initializeApp, cert } = require('firebase-admin/app');
+const { initializeApp, cert, getApps } = require('firebase-admin/app');
 const { getFirestore, FieldValue, Timestamp } = require('firebase-admin/firestore');
-const path  = require('path');
 
 // ============ CONFIG (dari .env) ============
-const PORT         = process.env.PORT          || 3002;
-const PROXY_SECRET = process.env.PROXY_SECRET  || '';
+const PORT         = parseInt(process.env.PORT || '3002', 10);
+const PROXY_SECRET = process.env.PROXY_SECRET || '';
 const _BASE        = process.env._API_BASE;
 const _KEY         = process.env._API_KEY;
 const SA_PATH      = process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
 
 // ─── Anti-abuse limits ───────────────────────────────────
-const DAILY_LIMIT      = parseInt(process.env.DAILY_LIMIT      || '3',  10); // max 3x/hari per fp
-const MAX_QUEUE_SIZE   = parseInt(process.env.MAX_QUEUE_SIZE   || '20', 10); // max 20 item di queue
-const IP_BURST_LIMIT   = parseInt(process.env.IP_BURST_LIMIT   || '5',  10); // max 5 req/menit per IP
+const DAILY_LIMIT      = parseInt(process.env.DAILY_LIMIT    || '3',  10);
+const MAX_QUEUE_SIZE   = parseInt(process.env.MAX_QUEUE_SIZE || '20', 10);
+const IP_BURST_LIMIT   = parseInt(process.env.IP_BURST_LIMIT || '5',  10);
 const IP_BURST_WINDOW  = 60 * 1000; // 1 menit
-const QUEUE_DELAY      = parseInt(process.env.QUEUE_DELAY_MS   || '10000', 10); // jeda antar item
+const QUEUE_DELAY      = parseInt(process.env.QUEUE_DELAY_MS || '10000', 10); // jeda antar item
 
 if (!_BASE || !_KEY) {
   console.error('[FATAL] _API_BASE / _API_KEY tidak ditemukan di .env');
@@ -44,20 +55,70 @@ if (!_BASE || !_KEY) {
 }
 
 // ============ FIREBASE ADMIN INIT ============
-const saPath = path.resolve(__dirname, SA_PATH);
-const serviceAccount = require(saPath);
+function initFirebase() {
+  if (getApps().length > 0) return getFirestore();
 
-initializeApp({ credential: cert(serviceAccount) });
+  let credential = null;
 
-const db   = getFirestore();
-const COLL = 'react_queue';   // antrian
-const CD   = 'cooldowns';     // rate limit per fingerprint (shared dengan frontend)
+  // 1. File path
+  if (SA_PATH) {
+    const resolvedPath = path.isAbsolute(SA_PATH)
+      ? SA_PATH
+      : path.resolve(__dirname, SA_PATH);
 
-// ============ STATE ============
+    if (fs.existsSync(resolvedPath)) {
+      credential = cert(require(resolvedPath));
+    }
+  }
+
+  // 2. JSON string di env
+  if (!credential && process.env.FIREBASE_SERVICE_ACCOUNT) {
+    try {
+      let raw = process.env.FIREBASE_SERVICE_ACCOUNT;
+      try {
+        credential = cert(JSON.parse(raw));
+      } catch {
+        raw = raw.replace(/\\\\n/g, '\\n');
+        credential = cert(JSON.parse(raw));
+      }
+    } catch (e) {
+      console.warn('[Firebase] Gagal parse FIREBASE_SERVICE_ACCOUNT JSON:', e.message);
+    }
+  }
+
+  // 3. Variable terpisah
+  if (!credential && process.env.FIREBASE_PROJECT_ID) {
+    credential = cert({
+      projectId   : process.env.FIREBASE_PROJECT_ID,
+      clientEmail : process.env.FIREBASE_CLIENT_EMAIL,
+      privateKey  : (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
+    });
+  }
+
+  if (!credential) {
+    console.error('[FATAL] Firebase credentials tidak ditemukan! Periksa FIREBASE_SERVICE_ACCOUNT_PATH atau FIREBASE_SERVICE_ACCOUNT di .env');
+    process.exit(1);
+  }
+
+  initializeApp({ credential });
+  return getFirestore();
+}
+
+const db   = initFirebase();
+const COLL = 'react_queue';   // antrian utama
+const CD   = 'cooldowns';     // rate limit per fingerprint
+
+// ============ IN-MEMORY STATE ============
 let isProcessing = false;
+const inFlightSet = new Set(); // ID item yang sedang diproses di memory
 
 // In-memory IP burst tracker: { ip: { count, windowStart } }
 const ipTracker = new Map();
+
+// In-memory queue count cache (hemat Firestore count reads pada polling)
+let cachedQueueCount = 0;
+let lastCountFetchTime = 0;
+const COUNT_CACHE_TTL = 5000; // 5 detik
 
 // ============ HELPERS ============
 
@@ -65,25 +126,20 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** Ambil IP real dari request (support X-Forwarded-For) */
 function getIp(req) {
   const xff = req.headers['x-forwarded-for'];
   return (xff ? xff.split(',')[0] : req.socket.remoteAddress || '').trim();
 }
 
-/** Midnight lokal hari ini dalam ms */
+// Midnight 00:00 WIB (UTC+7) dalam ms
+const WIB_OFFSET = 7 * 60 * 60 * 1000;
+const DAY_MS     = 86_400_000;
 function todayMidnightMs() {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
+  return Math.floor((Date.now() + WIB_OFFSET) / DAY_MS) * DAY_MS - WIB_OFFSET;
 }
 
 // ============ ANTI-ABUSE CHECKS ============
 
-/**
- * Cek & update rate limit per-IP (in-memory burst limiter).
- * Return true kalau allowed, false kalau kena limit.
- */
 function checkIpBurst(ip) {
   const now  = Date.now();
   const rec  = ipTracker.get(ip);
@@ -94,27 +150,16 @@ function checkIpBurst(ip) {
   }
 
   rec.count++;
-  if (rec.count > IP_BURST_LIMIT) {
-    return false;
-  }
-  return true;
+  return rec.count <= IP_BURST_LIMIT;
 }
 
-/**
- * Cek rate limit per fingerprint dari Firestore `cooldowns`.
- * Pakai koleksi yang sama dengan frontend supaya sinkron.
- *
- * Return: { allowed: boolean, count: number, reason?: string }
- */
 async function checkFpLimit(fp) {
   if (!fp || typeof fp !== 'string' || fp.length < 8) {
     return { allowed: false, reason: 'Fingerprint tidak valid' };
   }
 
   const snap = await db.collection(CD).doc(fp).get();
-
   if (!snap.exists) {
-    // User baru, boleh
     return { allowed: true, count: 0 };
   }
 
@@ -124,7 +169,6 @@ async function checkFpLimit(fp) {
     ? data.dayStartAt.toMillis()
     : (data.dayStartAt?.seconds ? data.dayStartAt.seconds * 1000 : 0);
 
-  // Hari sudah berganti? reset
   if (dayStartMs < todayMs) {
     return { allowed: true, count: 0 };
   }
@@ -137,10 +181,6 @@ async function checkFpLimit(fp) {
   return { allowed: true, count };
 }
 
-/**
- * Increment cooldown counter di Firestore.
- * Dipanggil SETELAH item berhasil masuk antrian (bukan setelah selesai diproses).
- */
 async function incrementFpCount(fp, currentCount) {
   const todayMs    = todayMidnightMs();
   const dayStartTs = Timestamp.fromMillis(todayMs);
@@ -156,26 +196,34 @@ async function incrementFpCount(fp, currentCount) {
 }
 
 /**
- * Cek apakah URL ini sudah ada di queue (pending/processing).
- * Mencegah submit URL yang sama berkali-kali.
+ * Cek apakah URL ini masih antre belum selesai (isDone == false).
  */
 async function isDuplicateUrl(targetUrl) {
-  const [pendSnap, procSnap] = await Promise.all([
-    db.collection(COLL).where('status', '==', 'pending').where('target', '==', targetUrl).limit(1).get(),
-    db.collection(COLL).where('status', '==', 'processing').where('target', '==', targetUrl).limit(1).get(),
-  ]);
-  return !pendSnap.empty || !procSnap.empty;
+  const snap = await db.collection(COLL)
+    .where('target', '==', targetUrl)
+    .where('isDone', '==', false)
+    .limit(1)
+    .get();
+  return !snap.empty;
 }
 
 /**
- * Hitung total item aktif di queue (pending + processing).
+ * Hitung jumlah item aktif di antrian (isDone == false) dengan in-memory cache.
  */
-async function getActiveQueueCount() {
-  const [pendSnap, procSnap] = await Promise.all([
-    db.collection(COLL).where('status', '==', 'pending').count().get(),
-    db.collection(COLL).where('status', '==', 'processing').count().get(),
-  ]);
-  return pendSnap.data().count + procSnap.data().count;
+async function getActiveQueueCount(forceRefresh = false) {
+  const now = Date.now();
+  if (!forceRefresh && (now - lastCountFetchTime < COUNT_CACHE_TTL)) {
+    return cachedQueueCount;
+  }
+
+  const snap = await db.collection(COLL)
+    .where('isDone', '==', false)
+    .count()
+    .get();
+
+  cachedQueueCount = snap.data().count;
+  lastCountFetchTime = now;
+  return cachedQueueCount;
 }
 
 // ============ FIRESTORE QUEUE HELPERS ============
@@ -183,101 +231,114 @@ async function getActiveQueueCount() {
 async function enqueue(targetUrl, reaction, fp, ip) {
   const doc = await db.collection(COLL).add({
     target    : targetUrl,
-    reaction,
-    status    : 'pending',
-    fp        : fp || null,   // fingerprint (untuk audit trail)
-    ip        : ip || null,   // IP (untuk audit trail, tidak diekspos ke client)
+    reaction  : reaction.trim(),
+    isDone    : false,        // false = antrian, true = sudah dikerjakan
+    fp        : fp || null,   // audit
+    ip        : ip || null,   // audit
     createdAt : FieldValue.serverTimestamp(),
     updatedAt : FieldValue.serverTimestamp(),
   });
+  cachedQueueCount++;
   return doc.id;
 }
 
-async function getPendingItems() {
+/**
+ * Ambil batch item yang masih antre (isDone == false).
+ * Menggunakan sorting in-memory agar tidak memerlukan composite index berbayar di Firestore.
+ */
+async function getPendingBatch(limitCount = 20) {
   const snap = await db.collection(COLL)
-    .where('status', '==', 'pending')
+    .where('isDone', '==', false)
+    .limit(limitCount)
     .get();
+
+  if (snap.empty) return [];
+
   return snap.docs
     .map((d) => ({ id: d.id, ...d.data() }))
     .sort((a, b) => {
-      const ta = a.createdAt ? a.createdAt.toMillis() : 0;
-      const tb = b.createdAt ? b.createdAt.toMillis() : 0;
+      const ta = a.createdAt?.toMillis ? a.createdAt.toMillis() : (a.createdAt?.seconds ? a.createdAt.seconds * 1000 : 0);
+      const tb = b.createdAt?.toMillis ? b.createdAt.toMillis() : (b.createdAt?.seconds ? b.createdAt.seconds * 1000 : 0);
       return ta - tb;
     });
 }
 
-async function markProcessing(id) {
+/**
+ * Update status selesai pada dokumen Firestore (hanya 1x write per item).
+ */
+async function markItemDone(id, success, apiResult) {
   await db.collection(COLL).doc(id).update({
-    status    : 'processing',
+    isDone    : true,
+    success   : success,
+    status    : success ? 'done' : 'failed', // backward compatibility
+    result    : apiResult || null,
+    doneAt    : FieldValue.serverTimestamp(),
     updatedAt : FieldValue.serverTimestamp(),
   });
+  if (cachedQueueCount > 0) cachedQueueCount--;
 }
 
-async function markDone(id, success) {
-  await db.collection(COLL).doc(id).update({
-    status    : success ? 'done' : 'failed',
-    updatedAt : FieldValue.serverTimestamp(),
-  });
-}
-
-function waitForResult(id) {
-  return new Promise((resolve) => {
-    const unsub = db.collection(COLL).doc(id).onSnapshot((snap) => {
-      const data = snap.data();
-      if (data && (data.status === 'done' || data.status === 'failed')) {
-        unsub();
-        resolve({
-          statusCode : 200,
-          target     : data.target,
-          reaction   : data.reaction,
-          status     : data.status === 'done' ? 'success' : 'failed',
-        });
-      }
-    });
-  });
-}
-
-// ============ QUEUE WORKER ============
+// ============ QUEUE WORKER (QUOTA-EFFICIENT) ============
 
 async function processQueue() {
   if (isProcessing) return;
   isProcessing = true;
-  console.log('\n[Queue] Worker started');
+  console.log('\n[Queue] Worker aktif...');
 
   try {
-    let items = await getPendingItems();
+    let hasMore = true;
 
-    while (items.length > 0) {
-      const item = items[0];
-      console.log('\n[Queue] Processing ' + item.id);
-      console.log('   target   :', item.target);
+    while (hasMore) {
+      const batch = await getPendingBatch(15);
+      // Filter out item yang mungkin sedang diproses
+      const todo = batch.filter(item => !inFlightSet.has(item.id));
 
-      await markProcessing(item.id);
-
-      let success = false;
-      try {
-        const r = await callReactionApi(item.target, item.reaction);
-        console.log('   [API] HTTP ' + r.statusCode);
-        success = r.statusCode === 200 && r.body && r.body.status === true;
-      } catch (e) {
-        console.log('   [API] Error:', e.message);
+      if (todo.length === 0) {
+        hasMore = false;
+        break;
       }
 
-      await markDone(item.id, success);
-      console.log('   Result:', success ? 'done ✓' : 'failed ✗');
+      for (let i = 0; i < todo.length; i++) {
+        const item = todo[i];
+        inFlightSet.add(item.id);
 
-      items = await getPendingItems();
-      if (items.length > 0) {
-        console.log('[Queue] Waiting ' + (QUEUE_DELAY / 1000) + 's...');
-        await sleep(QUEUE_DELAY);
+        console.log(`\n[Queue] Mengerjakan [${item.id}]`);
+        console.log(`   Target   : ${item.target}`);
+        console.log(`   Reaction : ${item.reaction}`);
+
+        let success = false;
+        let bodyResult = null;
+
+        try {
+          const r = await callReactionApi(item.target, item.reaction);
+          console.log(`   [API] HTTP ${r.statusCode}`);
+          bodyResult = r.body;
+          success = r.statusCode === 200 && r.body && r.body.status === true;
+        } catch (e) {
+          console.error(`   [API] Error: ${e.message}`);
+          bodyResult = { error: e.message };
+        }
+
+        // Tulis hasil ke Firestore (1x write, isDone = true)
+        await markItemDone(item.id, success, bodyResult);
+        inFlightSet.delete(item.id);
+
+        console.log(`   Hasil: ${success ? 'SUKSES ✓ (isDone: true)' : 'GAGAL ✗ (isDone: true)'}`);
+
+        // Berikan jeda antar request jika masih ada antrian
+        const isLastInBatch = (i === todo.length - 1);
+        if (!isLastInBatch || todo.length >= 15) {
+          console.log(`   [Queue] Delay ${QUEUE_DELAY / 1000}s...`);
+          await sleep(QUEUE_DELAY);
+        }
       }
     }
   } catch (e) {
     console.error('[Queue] Worker error:', e.message);
+  } finally {
+    isProcessing = false;
+    console.log('[Queue] Worker selesai (idle)\n');
   }
-
-  isProcessing = false;
-  console.log('[Queue] Worker done\n');
 }
 
 // ============ API CALLER ============
@@ -294,7 +355,7 @@ function callReactionApi(targetUrl, reaction) {
       port     : parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
       path     : parsed.pathname + parsed.search,
       method   : 'GET',
-      headers  : { 'User-Agent': 'ReactProxy/3.0', 'Accept': 'application/json' },
+      headers  : { 'User-Agent': 'ReactProxy/4.0', 'Accept': 'application/json' },
     };
 
     const req = lib.request(options, (res) => {
@@ -302,7 +363,7 @@ function callReactionApi(targetUrl, reaction) {
       res.on('data', (c) => { raw += c; });
       res.on('end', () => {
         try   { resolve({ statusCode: res.statusCode, body: JSON.parse(raw) }); }
-        catch (_) { resolve({ statusCode: res.statusCode, body: {} }); }
+        catch (_) { resolve({ statusCode: res.statusCode, body: { raw } }); }
       });
     });
 
@@ -337,7 +398,6 @@ function json(res, code, obj) {
   res.end(JSON.stringify(obj));
 }
 
-// ── Validasi URL ──
 const POST_URL_RE = /whatsapp\.com\/channel\/[A-Za-z0-9_-]+\/\d+/;
 function validateInput(targetUrl, reaction) {
   if (!targetUrl || typeof targetUrl !== 'string') return '"url" wajib diisi';
@@ -347,7 +407,6 @@ function validateInput(targetUrl, reaction) {
   return null;
 }
 
-// ── Auth ──
 function checkSecret(req) {
   if (!PROXY_SECRET) return true;
   return req.headers['x-proxy-secret'] === PROXY_SECRET;
@@ -367,35 +426,32 @@ const server = http.createServer(async (req, res) => {
   // ── GET /status ──────────────────────────────────────────
   if (req.method === 'GET' && pathname === '/status') {
     const queueLength = await getActiveQueueCount();
-    json(res, 200, { status: 'ok', isProcessing, queueLength, ts: Date.now() });
+    json(res, 200, {
+      status: 'ok',
+      isProcessing,
+      queueLength,
+      inFlightCount: inFlightSet.size,
+      ts: Date.now(),
+    });
     return;
   }
 
   // ── GET /queue ───────────────────────────────────────────
   if (req.method === 'GET' && pathname === '/queue') {
-    const snap = await db.collection(COLL)
-      .where('status', '==', 'pending')
-      .limit(50)
-      .get();
-
-    const items = snap.docs
-      .map((d) => ({
-        id       : d.id,
-        target   : d.data().target,
-        reaction : d.data().reaction,
-        status   : d.data().status,
-        _ts      : d.data().createdAt ? d.data().createdAt.toMillis() : 0,
-      }))
-      .sort((a, b) => a._ts - b._ts)
-      .map(({ _ts, ...rest }) => rest);
-
-    json(res, 200, { isProcessing, queueLength: items.length, queue: items });
+    const items = await getPendingBatch(50);
+    const sanitized = items.map(d => ({
+      id       : d.id,
+      target   : d.target,
+      reaction : d.reaction,
+      isDone   : d.isDone,
+      createdAt: d.createdAt,
+    }));
+    json(res, 200, { isProcessing, queueLength: sanitized.length, queue: sanitized });
     return;
   }
 
   // ── POST /react ──────────────────────────────────────────
   if (req.method === 'POST' && pathname === '/react') {
-
     // 1. Auth secret
     if (!checkSecret(req)) {
       return json(res, 401, { error: 'Unauthorized' });
@@ -416,9 +472,9 @@ const server = http.createServer(async (req, res) => {
     const inputErr = validateInput(body.url, body.reaction);
     if (inputErr) return json(res, 400, { error: inputErr });
 
-    // 5. Fingerprint rate limit (server-side, pakai Firestore cooldowns)
-    const fp       = (req.headers['x-fp'] || '').trim();
-    const fpCheck  = await checkFpLimit(fp);
+    // 5. Fingerprint rate limit
+    const fp      = (req.headers['x-fp'] || '').trim();
+    const fpCheck = await checkFpLimit(fp);
     if (!fpCheck.allowed) {
       console.log('[Abuse] FP limit:', fp, '|', fpCheck.reason);
       return json(res, 429, { error: fpCheck.reason || 'Limit harian tercapai' });
@@ -431,29 +487,29 @@ const server = http.createServer(async (req, res) => {
       return json(res, 503, { error: 'Antrian penuh, coba lagi nanti.' });
     }
 
-    // 7. Duplicate URL check
+    // 7. Duplicate URL check (isDone == false)
     const isDup = await isDuplicateUrl(body.url);
     if (isDup) {
       return json(res, 409, { error: 'URL ini sudah ada di antrian.' });
     }
 
-    // ── Semua check lolos, masukkan ke antrian ──
+    // ── Masukkan ke antrian ──
     const id = await enqueue(body.url, body.reaction, fp, ip);
-
-    // Increment counter SETELAH berhasil masuk queue
     await incrementFpCount(fp, fpCheck.count);
 
-    processQueue().catch((e) => console.error('[Queue] Crash:', e.message));
+    // Trigger background worker
+    processQueue().catch((e) => console.error('[Queue] Worker error:', e.message));
 
-    const newQueueCount = queueCount + 1;
-    console.log('\n[React] Queued', id, '| fp:', fp.substring(0, 8) + '...', '| pos:', newQueueCount);
+    const newPosition = queueCount + 1;
+    console.log(`\n[React] Masuk antrian #${newPosition} | ID: ${id}`);
 
     json(res, 202, {
       statusCode : 202,
       status     : 'queued',
+      isDone     : false,
       queueId    : id,
-      position   : newQueueCount,
-      message    : 'Request masuk antrian posisi #' + newQueueCount,
+      position   : newPosition,
+      message    : `Request masuk antrian posisi #${newPosition}`,
     });
     return;
   }
@@ -462,31 +518,68 @@ const server = http.createServer(async (req, res) => {
   json(res, 404, { error: 'Not found' });
 });
 
-// ── Resume pending saat boot ──
-async function resumeOnBoot() {
-  const items = await getPendingItems();
-  if (items.length > 0) {
-    console.log('[Boot] Resuming ' + items.length + ' pending item(s)...');
-    processQueue().catch((e) => console.error('[Queue] Boot crash:', e.message));
-  }
-}
-
-// ── Realtime listener: tangkap antrian baru dari Firestore (misal dari Vercel) ──
+// ── Realtime listener: hanya memantau isDone == false ──
 function listenToQueue() {
-  console.log('[Queue] Realtime listener aktif (menunggu order dari Firestore)...');
+  console.log('[Queue] Realtime listener aktif (menyimak dokumen isDone == false)...');
+
   db.collection(COLL)
-    .where('status', '==', 'pending')
+    .where('isDone', '==', false)
     .onSnapshot((snapshot) => {
-      if (!snapshot.empty && !isProcessing) {
-        console.log(`[Queue] Ditemukan ${snapshot.size} item pending baru, memproses antrian...`);
-        processQueue().catch((e) => console.error('[Queue] Worker error:', e.message));
+      // Saat dokumen diubah jadi isDone: true, doc tersebut keluar dari snapshot (type: 'removed')
+      // dan TIDAK dihitung sebagai read berbayar tambahan oleh Firestore!
+      const hasAdded = snapshot.docChanges().some(change => change.type === 'added');
+      if (hasAdded && !isProcessing) {
+        console.log(`[Queue] Ada item baru masuk antrian (${snapshot.size} pending). Memproses...`);
+        processQueue().catch((e) => console.error('[Queue] Error:', e.message));
       }
     }, (err) => {
       console.error('[Queue] Firestore listener error:', err.message);
     });
 }
 
-// ── Bersihkan ipTracker dari IP lama setiap 5 menit ──
+// ── Auto-cleanup: bersihkan dokumen isDone == true yang berumur > 24 jam ──
+async function cleanupOldCompletedItems() {
+  try {
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const snap = await db.collection(COLL)
+      .where('isDone', '==', true)
+      .where('doneAt', '<=', Timestamp.fromDate(oneDayAgo))
+      .limit(50)
+      .get();
+
+    if (!snap.empty) {
+      const batch = db.batch();
+      snap.docs.forEach(d => batch.delete(d.ref));
+      await batch.commit();
+      console.log(`[Cleanup] Menghapus ${snap.size} dokumen riwayat selesai lama (> 24 jam)`);
+    }
+  } catch (err) {
+    // Abaikan jika query membutuhkan index tambahan
+  }
+}
+
+// ── Migrasi dokumen legacy saat boot ──
+async function migrateLegacyDocsOnBoot() {
+  try {
+    const snap = await db.collection(COLL)
+      .where('status', '==', 'pending')
+      .limit(20)
+      .get();
+
+    if (!snap.empty) {
+      console.log(`[Boot] Menemukan ${snap.size} dokumen legacy tanpa isDone, memperbarui...`);
+      const batch = db.batch();
+      snap.docs.forEach(doc => {
+        batch.update(doc.ref, { isDone: false });
+      });
+      await batch.commit();
+    }
+  } catch (_) {
+    // Abaikan jika sudah tidak ada dokumen legacy
+  }
+}
+
+// ── Interval bersihkan ipTracker setiap 5 menit & cleanup Firestore setiap 6 jam ──
 setInterval(() => {
   const now = Date.now();
   for (const [ip, rec] of ipTracker.entries()) {
@@ -494,20 +587,28 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
+setInterval(() => {
+  cleanupOldCompletedItems().catch(() => {});
+}, 6 * 60 * 60 * 1000);
+
+// ── Start Server ──
 server.listen(PORT, async () => {
   console.log('');
-  console.log('╔══════════════════════════════════════════╗');
-  console.log('║   Reaction Queue Backend v3              ║');
-  console.log('║   Port       : ' + PORT + '                      ║');
-  console.log('║   Queue      : Firebase Firestore        ║');
-  console.log('║   Delay      : ' + (QUEUE_DELAY / 1000) + 's per item          ║');
-  console.log('║   Daily limit: ' + DAILY_LIMIT + 'x per fingerprint       ║');
-  console.log('║   Queue max  : ' + MAX_QUEUE_SIZE + ' items                 ║');
-  console.log('║   IP burst   : ' + IP_BURST_LIMIT + 'x per menit            ║');
-  console.log('║   Auth       : ' + (PROXY_SECRET ? 'X-Proxy-Secret ✓' : 'OPEN (set PROXY_SECRET!)') + '        ║');
-  console.log('╚══════════════════════════════════════════╝');
+  console.log('╔══════════════════════════════════════════════════════════╗');
+  console.log('║   Reaction Queue Backend v4 (Quota-Optimized)            ║');
+  console.log(`║   Port        : ${PORT}                                     ║`);
+  console.log('║   Queue       : Firebase Firestore (`react_queue`)       ║');
+  console.log('║   Status Field: `isDone: false` (antre) / `true` (selesai)║');
+  console.log(`║   Jeda Worker : ${QUEUE_DELAY / 1000}s per request                         ║`);
+  console.log(`║   Daily Limit : ${DAILY_LIMIT}x per fingerprint                        ║`);
+  console.log(`║   Max Queue   : ${MAX_QUEUE_SIZE} item                                  ║`);
+  console.log(`║   Burst IP    : ${IP_BURST_LIMIT}x per menit                             ║`);
+  console.log(`║   Auth Secret : ${PROXY_SECRET ? 'Aktif (X-Proxy-Secret) ✓' : 'TIDAK AKTIF ✗'}              ║`);
+  console.log('╚══════════════════════════════════════════════════════════╝');
   console.log('');
 
-  await resumeOnBoot();
+  await migrateLegacyDocsOnBoot();
+  await getActiveQueueCount(true);
   listenToQueue();
+  cleanupOldCompletedItems().catch(() => {});
 });

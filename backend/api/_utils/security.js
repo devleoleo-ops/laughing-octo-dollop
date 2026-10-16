@@ -2,7 +2,6 @@
 
 const crypto = require('crypto');
 const https  = require('https');
-const http   = require('http');
 
 // ============================================================
 //  SECRETS — wajib di-set di Vercel Environment Variables

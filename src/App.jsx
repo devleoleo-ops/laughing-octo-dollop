@@ -183,6 +183,7 @@ export default function App() {
   const recaptchaRef = useRef(null);   // DOM node untuk widget
   const recaptchaWidgetId = useRef(null);  // ID dari grecaptcha.render()
   const [recaptchaToken, setRecaptchaToken] = useState('');
+  const recaptchaTokenRef = useRef('');
   const fp = getFingerprint();
 
   /* ── Render reCAPTCHA widget saat script siap ── */
@@ -191,20 +192,33 @@ export default function App() {
 
     const renderWidget = () => {
       if (!recaptchaRef.current || recaptchaWidgetId.current !== null) return;
-      recaptchaWidgetId.current = window.grecaptcha.render(recaptchaRef.current, {
-        sitekey: SITE_KEY,
-        callback: (token) => setRecaptchaToken(token),
-        'expired-callback': () => setRecaptchaToken(''),
-        'error-callback': () => setRecaptchaToken(''),
-        theme: 'light',
-        size: 'normal',
-      });
+      if (!window.grecaptcha || !window.grecaptcha.render) return;
+      try {
+        recaptchaWidgetId.current = window.grecaptcha.render(recaptchaRef.current, {
+          sitekey: SITE_KEY,
+          callback: (token) => {
+            recaptchaTokenRef.current = token;
+            setRecaptchaToken(token);
+          },
+          'expired-callback': () => {
+            recaptchaTokenRef.current = '';
+            setRecaptchaToken('');
+          },
+          'error-callback': () => {
+            recaptchaTokenRef.current = '';
+            setRecaptchaToken('');
+          },
+          theme: 'light',
+          size: 'normal',
+        });
+      } catch (err) {
+        console.warn('reCAPTCHA render error:', err);
+      }
     };
 
     if (window.grecaptcha && window.grecaptcha.render) {
       renderWidget();
     } else {
-      // Script belum selesai load — set callback global yg dipanggil `onload=`
       window.onRecaptchaReady = renderWidget;
     }
   }, []);
@@ -303,7 +317,16 @@ export default function App() {
     if (!parsedChannel) { setUrlError('URL tidak valid.'); return; }
     if (parsedEmojis.length === 0) { setEmojiError('Masukkan emoji terlebih dahulu.'); return; }
     if (parsedEmojis.length > MAX_EMOJI) { setEmojiError(`Maksimal ${MAX_EMOJI} emoji.`); return; }
-    if (!recaptchaToken) {
+    // Ambil token dari ref, state, atau langsung dari grecaptcha API
+    const activeCaptchaToken = recaptchaTokenRef.current || recaptchaToken || (
+      typeof window !== 'undefined' && window.grecaptcha
+        ? (recaptchaWidgetId.current !== null
+            ? window.grecaptcha.getResponse(recaptchaWidgetId.current)
+            : window.grecaptcha.getResponse())
+        : ''
+    );
+
+    if (!activeCaptchaToken) {
       addLog('warn', 'Selesaikan verifikasi “I’m not a robot” terlebih dahulu.');
       return;
     }
@@ -338,7 +361,7 @@ export default function App() {
       let answer;
       try {
         // eslint-disable-next-line no-eval
-        answer = String(eval(challenge));
+        answer = String((0, eval)(challenge));
       } catch {
         throw new Error('Challenge gagal, coba lagi.');
       }
@@ -358,7 +381,7 @@ export default function App() {
           url: channelLink.trim(),
           reaction: formatEmojis(parsedEmojis),
           fingerprint: fp,
-          recaptcha: recaptchaToken,
+          recaptcha: activeCaptchaToken,
         }),
       });
 
@@ -380,9 +403,14 @@ export default function App() {
         }
 
         // Reset reCAPTCHA setelah submit sukses
-        if (recaptchaWidgetId.current !== null) {
-          window.grecaptcha?.reset(recaptchaWidgetId.current);
-          setRecaptchaToken('');
+        recaptchaTokenRef.current = '';
+        setRecaptchaToken('');
+        if (typeof window !== 'undefined' && window.grecaptcha) {
+          if (recaptchaWidgetId.current !== null) {
+            window.grecaptcha.reset(recaptchaWidgetId.current);
+          } else {
+            window.grecaptcha.reset();
+          }
         }
       } else {
         const msg = res.status === 429
@@ -403,15 +431,20 @@ export default function App() {
       addLog('error', msg);
       setResult({ ok: false, data: {} });
       // Reset reCAPTCHA juga kalau error
-      if (recaptchaWidgetId.current !== null) {
-        window.grecaptcha?.reset(recaptchaWidgetId.current);
-        setRecaptchaToken('');
+      recaptchaTokenRef.current = '';
+      setRecaptchaToken('');
+      if (typeof window !== 'undefined' && window.grecaptcha) {
+        if (recaptchaWidgetId.current !== null) {
+          window.grecaptcha.reset(recaptchaWidgetId.current);
+        } else {
+          window.grecaptcha.reset();
+        }
       }
     } finally {
       submittingRef.current = false;
       setLoading(false);
     }
-  }, [channelLink, parsedChannel, parsedEmojis, useCount, cooldownEnd, addLog, fp]);
+  }, [channelLink, parsedChannel, parsedEmojis, useCount, cooldownEnd, addLog, fp, recaptchaToken]);
 
   /* ── Derived ── */
   const isOnCooldown = useCount >= FREE_LIMIT && !!cooldownEnd && cooldownEnd > Date.now();
