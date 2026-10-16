@@ -24,8 +24,7 @@ const fbApp = initializeApp(firebaseConfig);
 const db = getFirestore(fbApp);
 
 /* ── Constants ──────────────────────────────────────────────── */
-// Ganti dengan URL Vercel backend kamu setelah deploy
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000';
+const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL || '').replace(/\/+$/, '');
 const FREE_LIMIT = 3;
 const MAX_EMOJI = 12;
 const DAY_MS = 86_400_000; // 24 jam

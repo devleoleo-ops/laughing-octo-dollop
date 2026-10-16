@@ -30,8 +30,9 @@ const fs    = require('fs');
 require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 require('dotenv').config();
 
-const http  = require('http');
-const https = require('https');
+const crypto = require('crypto');
+const http   = require('http');
+const https  = require('https');
 const { initializeApp, cert, getApps } = require('firebase-admin/app');
 const { getFirestore, FieldValue, Timestamp } = require('firebase-admin/firestore');
 
@@ -41,6 +42,11 @@ const PROXY_SECRET = process.env.PROXY_SECRET || '';
 const _BASE        = process.env._API_BASE;
 const _KEY         = process.env._API_KEY;
 const SA_PATH      = process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
+
+// ─── Security Secrets ─────────────────────────────────────
+const CSRF_SECRET      = process.env.CSRF_SECRET      || '348QHGORE6pIFgOkXPo85XJeJYctUlA4m5c6ULigT2TdA-7RPRwh5GlJQFBzX_-c';
+const IP_SALT          = process.env.IP_SALT          || '0782fe1f3c55fa6c17872e05defb6fa97a434e02ef9dad834222d24091107f9a';
+const RECAPTCHA_SECRET = process.env.RECAPTCHA_SECRET || '6LfId-4tAAAAALddQWTKoq8FvYcGPI6nfw4mpxdy';
 
 // ─── Anti-abuse limits ───────────────────────────────────
 const DAILY_LIMIT      = parseInt(process.env.DAILY_LIMIT    || '3',  10);
@@ -378,7 +384,87 @@ function callReactionApi(targetUrl, reaction) {
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin',  '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Proxy-Secret, X-FP');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-CSRF-Token, X-Challenge-Answer, X-Requested-With, X-FP, X-Proxy-Secret');
+}
+
+// ─── CSRF & reCAPTCHA Helpers ─────────────────────────────
+function hashIP(ip) {
+  return 'h_' + crypto.createHash('sha256').update(ip + IP_SALT).digest('hex').slice(0, 20);
+}
+
+function generateCsrf(ipHash) {
+  const nonce     = crypto.randomBytes(16).toString('hex');
+  const timestamp = Date.now().toString(36);
+  const a         = Math.floor(Math.random() * 80) + 12;
+  const b         = Math.floor(Math.random() * 70) + 8;
+  const challenge = `${a} + ${b}`;
+  const answer    = String(a + b);
+  const ipPart    = ipHash ? ipHash.slice(0, 12) : 'none';
+
+  const dataToSign = `${nonce}\x00${timestamp}\x00${ipPart}\x00${answer}`;
+  const sig = crypto.createHmac('sha256', CSRF_SECRET).update(dataToSign).digest('base64url');
+  const token = `${nonce}.${timestamp}.${ipPart}.${sig}`;
+
+  return { token, challenge };
+}
+
+function verifyCsrf(token, ipHash, clientAnswer) {
+  if (!token || typeof token !== 'string') return false;
+  const parts = token.split('.');
+  if (parts.length !== 4) return false;
+
+  const [nonce, timestamp, tokenIpHash, sig] = parts;
+  const tsMs = parseInt(timestamp, 36);
+  const tokenAge = Date.now() - tsMs;
+  if (isNaN(tokenAge) || tokenAge > 10 * 60 * 1000 || tokenAge < 0) return false;
+
+  if (!clientAnswer || typeof clientAnswer !== 'string') return false;
+
+  const dataToSign = `${nonce}\x00${timestamp}\x00${tokenIpHash}\x00${clientAnswer}`;
+  const expectedSig = crypto.createHmac('sha256', CSRF_SECRET).update(dataToSign).digest('base64url');
+
+  try {
+    return crypto.timingSafeEqual(Buffer.from(sig, 'base64url'), Buffer.from(expectedSig, 'base64url'));
+  } catch {
+    return false;
+  }
+}
+
+function verifyRecaptcha(token, remoteip) {
+  return new Promise((resolve) => {
+    if (!RECAPTCHA_SECRET || !token) return resolve(false);
+
+    const postData = new URLSearchParams({ secret: RECAPTCHA_SECRET, response: token });
+    if (remoteip) postData.append('remoteip', remoteip);
+    const bodyStr = postData.toString();
+
+    const options = {
+      hostname: 'www.google.com',
+      path: '/recaptcha/api/siteverify',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(bodyStr),
+      },
+    };
+
+    const req = https.request(options, (res) => {
+      let raw = '';
+      res.on('data', (c) => { raw += c; });
+      res.on('end', () => {
+        try {
+          const data = JSON.parse(raw);
+          resolve(data.success === true);
+        } catch {
+          resolve(false);
+        }
+      });
+    });
+
+    req.on('error', () => resolve(false));
+    req.write(bodyStr);
+    req.end();
+  });
 }
 
 function readBody(req) {
@@ -422,6 +508,90 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
   const ip = getIp(req);
+
+  // ── GET /api/get-token (CSRF + Challenge) ────────────────
+  if (req.method === 'GET' && pathname === '/api/get-token') {
+    const ipHash = hashIP(ip);
+    const csrf   = generateCsrf(ipHash);
+    json(res, 200, { success: true, token: csrf.token, challenge: csrf.challenge });
+    return;
+  }
+
+  // ── POST /api/submit-react (Frontend Submission) ──────────
+  if (req.method === 'POST' && pathname === '/api/submit-react') {
+    // 1. IP burst limit
+    if (!checkIpBurst(ip)) {
+      return json(res, 429, { error: 'Terlalu banyak request, coba lagi nanti.', code: 'IP_BURST_EXCEEDED' });
+    }
+
+    // 2. Parse body
+    let body;
+    try { body = await readBody(req); }
+    catch (_) { return json(res, 400, { error: 'Invalid JSON' }); }
+
+    const { url: postUrl, reaction, fingerprint, recaptcha } = body || {};
+
+    // 3. Validasi reCAPTCHA v2
+    if (!recaptcha) {
+      return json(res, 400, { error: 'Selesaikan verifikasi reCAPTCHA terlebih dahulu.', code: 'MISSING_CAPTCHA' });
+    }
+    const captchaOk = await verifyRecaptcha(recaptcha, ip);
+    if (!captchaOk) {
+      return json(res, 403, { error: 'Verifikasi reCAPTCHA gagal atau expired. Silakan coba lagi.', code: 'INVALID_CAPTCHA' });
+    }
+
+    // 4. Validasi CSRF + challenge answer (jika ada)
+    const csrfToken    = req.headers['x-csrf-token'] || body._csrf;
+    const clientAnswer = req.headers['x-challenge-answer'] || body._challenge;
+    const ipHash       = hashIP(ip);
+    if (csrfToken && !verifyCsrf(csrfToken, ipHash, clientAnswer)) {
+      return json(res, 403, { error: 'Token keamanan tidak valid atau expired. Coba lagi.', code: 'INVALID_CSRF' });
+    }
+
+    // 5. Validasi format URL & reaction
+    const inputErr = validateInput(postUrl, reaction);
+    if (inputErr) return json(res, 400, { error: inputErr, code: 'INVALID_INPUT' });
+
+    // 6. Fingerprint rate limit
+    const fp      = (fingerprint || req.headers['x-fp'] || '').toString().trim().slice(0, 128);
+    const fpCheck = await checkFpLimit(fp);
+    if (!fpCheck.allowed) {
+      return json(res, 429, { error: fpCheck.reason || 'Limit harian tercapai. Coba lagi besok.', code: 'FP_LIMIT_EXCEEDED' });
+    }
+
+    // 7. Global queue size limit
+    const queueCount = await getActiveQueueCount();
+    if (queueCount >= MAX_QUEUE_SIZE) {
+      return json(res, 503, { error: 'Antrian penuh, coba lagi nanti.', code: 'QUEUE_FULL', queueLen: queueCount });
+    }
+
+    // 8. Duplicate URL check (isDone == false)
+    const isDup = await isDuplicateUrl(postUrl);
+    if (isDup) {
+      return json(res, 409, { error: 'URL ini sudah ada di antrian.', code: 'DUPLICATE_URL' });
+    }
+
+    // 9. Masukkan ke antrian Firestore (isDone: false)
+    const id = await enqueue(postUrl, reaction, fp, ip);
+    if (fp.length >= 8) {
+      await incrementFpCount(fp, fpCheck.count);
+    }
+
+    // Trigger background worker
+    processQueue().catch((e) => console.error('[Queue] Worker error:', e.message));
+
+    const newPosition = queueCount + 1;
+    console.log(`\n[React] Masuk antrian #${newPosition} | ID: ${id}`);
+
+    return json(res, 202, {
+      statusCode : 202,
+      status     : 'queued',
+      isDone     : false,
+      queueId    : id,
+      position   : newPosition,
+      message    : `Request masuk antrian posisi #${newPosition}`,
+    });
+  }
 
   // ── GET /status ──────────────────────────────────────────
   if (req.method === 'GET' && pathname === '/status') {
